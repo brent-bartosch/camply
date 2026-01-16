@@ -1,0 +1,150 @@
+# Campsite Availability Monitor
+# Runs daily at 10 AM Eastern Time when Recreation.gov releases new dates
+#
+# Setup:
+# 1. Add secrets in GitHub repo Settings > Secrets and variables > Actions
+# 2. Required: None (uses silent notifications by default)
+# 3. Optional: EMAIL_TO, EMAIL_USERNAME, EMAIL_PASSWORD, EMAIL_SMTP_SERVER
+#             PUSHOVER_USER, PUSHOVER_TOKEN
+#             SLACK_WEBHOOK, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+
+name: Campsite Monitor
+
+on:
+  schedule:
+    # 10:00 AM Eastern Time
+    # EST (Nov-Mar): 10 AM ET = 15:00 UTC
+    # EDT (Mar-Nov): 10 AM ET = 14:00 UTC
+    # Running at both times ensures we catch the release year-round
+    - cron: '0 14 * * *'  # 10 AM EDT (summer)
+    - cron: '0 15 * * *'  # 10 AM EST (winter)
+
+  # Allow manual trigger for testing
+  workflow_dispatch:
+    inputs:
+      date_preset:
+        description: 'Date preset to use'
+        required: true
+        default: 'next_releases'
+        type: choice
+        options:
+          - next_releases
+          - newly_available
+          - summer_weekends
+      campground:
+        description: 'Campground preset (e.g., kirk_creek)'
+        required: true
+        default: 'kirk_creek'
+
+env:
+  # Default search configuration
+  DEFAULT_CAMPGROUND: kirk_creek
+  DEFAULT_DATE_PRESET: next_releases
+
+jobs:
+  check-availability:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Create campgrounds config
+        run: |
+          mkdir -p ~/.camply
+          cat > ~/.camply/campgrounds.yaml << 'EOF'
+          campgrounds:
+            kirk_creek:
+              id: 233116
+              name: Kirk Creek
+              provider: RecreationDotGov
+              location: Big Sur, CA
+              preferred_sites:
+                # Add your ranked site preferences here
+                # - 90041  # Site 030
+                # - 90137  # Site 033
+          EOF
+
+      - name: Set up notification environment
+        run: |
+          # Create .camply config for notifications if secrets are set
+          if [ -n "${{ secrets.EMAIL_TO }}" ]; then
+            cat >> ~/.camply << EOF
+          EMAIL_TO_ADDRESS=${{ secrets.EMAIL_TO }}
+          EMAIL_USERNAME=${{ secrets.EMAIL_USERNAME }}
+          EMAIL_PASSWORD=${{ secrets.EMAIL_PASSWORD }}
+          EMAIL_SMTP_SERVER=${{ secrets.EMAIL_SMTP_SERVER || 'smtp.gmail.com' }}
+          EMAIL_SMTP_PORT=${{ secrets.EMAIL_SMTP_PORT || '465' }}
+          EOF
+          fi
+
+          if [ -n "${{ secrets.PUSHOVER_USER }}" ]; then
+            cat >> ~/.camply << EOF
+          PUSHOVER_PUSH_USER=${{ secrets.PUSHOVER_USER }}
+          PUSHOVER_PUSH_TOKEN=${{ secrets.PUSHOVER_TOKEN }}
+          EOF
+          fi
+
+          if [ -n "${{ secrets.SLACK_WEBHOOK }}" ]; then
+            echo "SLACK_WEBHOOK=${{ secrets.SLACK_WEBHOOK }}" >> ~/.camply
+          fi
+
+          if [ -n "${{ secrets.TELEGRAM_BOT_TOKEN }}" ]; then
+            cat >> ~/.camply << EOF
+          TELEGRAM_BOT_TOKEN=${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID=${{ secrets.TELEGRAM_CHAT_ID }}
+          EOF
+          fi
+
+      - name: Determine notification method
+        id: notifications
+        run: |
+          NOTIF="silent"
+          if [ -n "${{ secrets.EMAIL_TO }}" ]; then
+            NOTIF="email"
+          elif [ -n "${{ secrets.PUSHOVER_USER }}" ]; then
+            NOTIF="pushover"
+          elif [ -n "${{ secrets.SLACK_WEBHOOK }}" ]; then
+            NOTIF="slack"
+          elif [ -n "${{ secrets.TELEGRAM_BOT_TOKEN }}" ]; then
+            NOTIF="telegram"
+          fi
+          echo "method=$NOTIF" >> $GITHUB_OUTPUT
+
+      - name: Search for campsites
+        run: |
+          # Use workflow_dispatch inputs if triggered manually, otherwise use defaults
+          CAMPGROUND="${{ github.event.inputs.campground || env.DEFAULT_CAMPGROUND }}"
+          DATE_PRESET="${{ github.event.inputs.date_preset || env.DEFAULT_DATE_PRESET }}"
+          NOTIFICATION="${{ steps.notifications.outputs.method }}"
+
+          echo "🏕️ Searching: $CAMPGROUND with preset: $DATE_PRESET"
+          echo "📬 Notifications: $NOTIFICATION"
+          echo ""
+
+          uv run camply campsites \
+            -p "$CAMPGROUND" \
+            --date-preset "$DATE_PRESET" \
+            --search-once \
+            --notifications "$NOTIFICATION"
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "## Campsite Monitor Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Campground**: ${{ github.event.inputs.campground || env.DEFAULT_CAMPGROUND }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Date Preset**: ${{ github.event.inputs.date_preset || env.DEFAULT_DATE_PRESET }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Notification**: ${{ steps.notifications.outputs.method }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Run Time**: $(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> $GITHUB_STEP_SUMMARY

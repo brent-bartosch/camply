@@ -37,6 +37,13 @@ from camply.search import CAMPSITE_SEARCH_PROVIDER, BaseCampingSearch
 from camply.utils import configure_camply, log_camply, make_list, yaml_utils
 from camply.utils.general_utils import days_of_the_week_mapping, handle_search_windows
 from camply.utils.logging_utils import log_sorted_response
+from camply.presets import (
+    get_campground_ids,
+    get_date_preset,
+    list_campgrounds,
+    DATE_PRESETS,
+    CAMPGROUNDS,
+)
 
 logging.Logger.camply = log_camply
 logger = logging.getLogger(__name__)
@@ -497,6 +504,25 @@ day_of_the_week_argument = click.option(
     help="Day(s) of the Week to search.",
 )
 
+# Preset arguments
+preset_campground_argument = click.option(
+    "--preset-campground",
+    "-p",
+    multiple=True,
+    default=None,
+    metavar="NAME",
+    help="Use a preset campground by name (e.g., kirk_creek). "
+    "Can be specified multiple times. Use 'camply list-presets' to see available presets.",
+)
+date_preset_argument = click.option(
+    "--date-preset",
+    default=None,
+    type=click.Choice(list(DATE_PRESETS.keys()), case_sensitive=False),
+    help="Use a predefined date range preset. 'summer_weekends' generates all "
+    "Fri-Sun weekends for June-August within the 6-month booking window. "
+    "'newly_available' targets dates opening for booking in the next 7 days.",
+)
+
 
 def _get_equipment(equipment: Optional[List[str]]) -> List[Tuple[str, Optional[int]]]:
     """
@@ -529,8 +555,10 @@ def _validate_campsites(
     search_forever: bool,
     search_once: bool,
     day: Optional[Tuple[str]],
+    preset_campground: Optional[Tuple[str]] = None,
+    date_preset: Optional[str] = None,
     **kwargs: Dict[str, Any],
-) -> Tuple[bool, List[SearchWindow], Set[int]]:
+) -> Tuple[bool, List[SearchWindow], Set[int], List[int]]:
     """
     Validate the campsites portion of the CLI
 
@@ -551,32 +579,76 @@ def _validate_campsites(
     notify_first_try: bool
     search_forever: bool
     day: Optional[Tuple[str]]
+    preset_campground: Optional[Tuple[str]]
+    date_preset: Optional[str]
     **kwargs: Dict[str, Any]
 
     Returns
     -------
-    Tuple[bool, List[SearchWindow], Set[int]]
+    Tuple[bool, List[SearchWindow], Set[int], List[int]]
         Tuple containing continuous run eval, search_windows,
-        and days of the week
+        days of the week, and preset campground IDs
     """
-    if provider.startswith(RecreationDotGov.__name__) and all(
-        [
-            len(rec_area) == 0,
-            len(campground) == 0,
-            len(campsite) == 0,
-            yaml_config is None,
-        ]
-    ):
+    # Resolve preset campgrounds to IDs
+    preset_campground_ids = []
+    if preset_campground and len(preset_campground) > 0:
+        try:
+            preset_campground_ids = get_campground_ids(list(preset_campground))
+            logger.info(
+                "Using preset campground(s): %s → IDs: %s",
+                list(preset_campground),
+                preset_campground_ids,
+            )
+        except ValueError as e:
+            logger.error(str(e))
+            sys.exit(1)
+
+    # Check if we have any location specified
+    has_location = any([
+        len(rec_area) > 0,
+        len(campground) > 0,
+        len(campsite) > 0,
+        len(preset_campground_ids) > 0,
+        yaml_config is not None,
+    ])
+
+    if provider.startswith(RecreationDotGov.__name__) and not has_location:
         logger.error(
             "To search for Recreation.gov Campsites you must provide "
-            "either the --rec-area, --campground, or --campsite "
-            "parameters."
+            "either the --rec-area, --campground, --campsite, or "
+            "--preset-campground (-p) parameters."
         )
         sys.exit(1)
-    if yaml_config is None:
+
+    # Resolve date preset or use provided dates
+    if date_preset is not None:
+        try:
+            date_ranges = get_date_preset(date_preset)
+            logger.info(
+                "Using date preset '%s': %d date range(s)",
+                date_preset,
+                len(date_ranges),
+            )
+            # Convert to SearchWindow objects
+            search_windows = [
+                SearchWindow(start_date=start, end_date=end)
+                for start, end in date_ranges
+            ]
+            if len(search_windows) == 1:
+                search_windows = search_windows[0]
+        except ValueError as e:
+            logger.error(str(e))
+            sys.exit(1)
+    elif yaml_config is None:
+        if len(start_date) == 0 or len(end_date) == 0:
+            logger.error(
+                "You must provide --start-date and --end-date, or use --date-preset"
+            )
+            sys.exit(1)
         search_windows = handle_search_windows(start_date=start_date, end_date=end_date)
     else:
         search_windows = ()
+
     days_of_the_week = None
     if day is not None:
         days_of_the_week = {days_of_the_week_mapping[item] for item in day}
@@ -596,7 +668,7 @@ def _validate_campsites(
         ]
     ):
         continuous = True
-    return continuous, search_windows, days_of_the_week
+    return continuous, search_windows, days_of_the_week, preset_campground_ids
 
 
 def _get_provider_kwargs_from_cli(
@@ -620,12 +692,14 @@ def _get_provider_kwargs_from_cli(
     equipment: Tuple[Union[str, int]],
     equipment_id: Tuple[Union[str, int]],
     day: Optional[Tuple[str]],
+    preset_campground: Optional[Tuple[str]] = None,
+    date_preset: Optional[str] = None,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """
     Get Provider kwargs from CLI
     """
     notifications = make_list(notifications)
-    continuous, search_windows, days_of_the_week = _validate_campsites(
+    continuous, search_windows, days_of_the_week, preset_campground_ids = _validate_campsites(
         rec_area=rec_area,
         campground=campground,
         campsite=campsite,
@@ -642,6 +716,8 @@ def _get_provider_kwargs_from_cli(
         search_forever=search_forever,
         search_once=search_once,
         day=day,
+        preset_campground=preset_campground,
+        date_preset=date_preset,
     )
     if len(notifications) == 0:
         notifications = ["silent"]
@@ -655,10 +731,14 @@ def _get_provider_kwargs_from_cli(
         search_forever = False
     else:
         search_forever = True
+
+    # Combine explicit campgrounds with preset campground IDs
+    all_campgrounds = list(make_list(campground)) + preset_campground_ids
+
     provider_kwargs = {
         "search_window": search_windows,
         "recreation_area": make_list(rec_area),
-        "campgrounds": make_list(campground),
+        "campgrounds": all_campgrounds,
         "campsites": make_list(campsite),
         "weekends_only": weekends,
         "nights": int(nights),
@@ -685,6 +765,8 @@ def _get_provider_kwargs_from_cli(
 @rec_area_argument
 @campground_argument
 @campsite_id_argument
+@preset_campground_argument
+@date_preset_argument
 @start_date_argument
 @end_date_argument
 @nights_argument
@@ -710,6 +792,8 @@ def campsites(
     rec_area: Tuple[Union[str, int]],
     campground: Tuple[Union[str, int]],
     campsite: Tuple[Union[str, int]],
+    preset_campground: Tuple[str],
+    date_preset: Optional[str],
     start_date: str,
     end_date: str,
     weekends: bool,
@@ -734,9 +818,10 @@ def campsites(
     Search for a campsite within camply. Campsites are returned based on the search criteria
     provided. Campsites contain properties like booking date, site type (tent, RV, cabin, etc),
     capacity, price, and a link to make the booking. Required parameters include
-    `--start-date`, `--end-date`, `--rec-area` / `--campground`. Constant searching
-    functionality can be enabled with  `--continuous` and notifications can be enabled using
-    `--notifications`.
+    `--start-date`, `--end-date`, `--rec-area` / `--campground` / `--preset-campground`.
+    Use `--date-preset` for quick date ranges like 'summer_weekends' or 'newly_available'.
+    Constant searching functionality can be enabled with `--continuous` and notifications
+    can be enabled using `--notifications`.
     """
     if context.debug is None:
         context.debug = debug
@@ -769,6 +854,8 @@ def campsites(
             equipment_id=equipment_id,
             day=day,
             yaml_config=yaml_config,
+            preset_campground=preset_campground,
+            date_preset=date_preset,
         )
     provider_class: Type[BaseCampingSearch] = CAMPSITE_SEARCH_PROVIDER[provider]
     camping_finder: BaseCampingSearch = provider_class(**provider_kwargs)
@@ -797,6 +884,61 @@ def providers(
             provider_name,
             search_class.__doc__.strip().splitlines()[0],
         )
+
+
+@camply_command_line.command(cls=RichCommand)
+@debug_option
+@click.pass_obj
+def list_presets(
+    context: CamplyContext,
+    debug: bool,
+) -> None:
+    """
+    List available campground and date presets
+
+    Shows all configured campground presets (built-in and user-defined)
+    and available date presets for quick searches.
+    """
+    if context.debug is None:
+        context.debug = debug
+        _set_up_debug(debug=context.debug)
+
+    # List campground presets
+    logger.info("Campground Presets:")
+    campgrounds = list_campgrounds()
+    if not campgrounds:
+        logger.info("    No campground presets configured")
+    else:
+        for cg in campgrounds:
+            logger.info(
+                '    -p %s  →  %s (ID: %s)',
+                cg["preset_name"],
+                cg.get("name", "Unknown"),
+                cg.get("id", "?"),
+            )
+
+    logger.info("")
+    logger.info("Date Presets:")
+    for preset_name in DATE_PRESETS.keys():
+        if preset_name == "summer_weekends":
+            desc = "All Fri-Sun weekends June-September (within booking window)"
+        elif preset_name == "newly_available":
+            desc = "Dates opening for booking in the next 7 days"
+        elif preset_name == "next_releases":
+            desc = "Next 14 days of date releases (for daily monitoring)"
+        else:
+            desc = "Custom date range"
+        logger.info('    --date-preset %s  →  %s', preset_name, desc)
+
+    logger.info("")
+    logger.info("⏰ IMPORTANT: Recreation.gov releases at 10 AM Eastern Time!")
+    logger.info("   Schedule scripts to run at 10:00:01 AM ET for best results.")
+    logger.info("")
+    logger.info("Example usage:")
+    logger.info("    camply campsites -p kirk_creek --date-preset summer_weekends")
+    logger.info("")
+    logger.info("Daily monitoring (run at 10 AM ET):")
+    logger.info("    camply campsites -p kirk_creek --date-preset next_releases --search-once")
 
 
 test_notifications_kwargs = notification_kwargs.copy()
