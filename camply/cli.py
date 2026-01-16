@@ -41,6 +41,8 @@ from camply.presets import (
     get_campground_ids,
     get_date_preset,
     list_campgrounds,
+    print_booking_calendar,
+    get_todays_weekend_release,
     DATE_PRESETS,
     CAMPGROUNDS,
 )
@@ -921,24 +923,57 @@ def list_presets(
     logger.info("Date Presets:")
     for preset_name in DATE_PRESETS.keys():
         if preset_name == "summer_weekends":
-            desc = "All Fri-Sun weekends June-September (within booking window)"
+            desc = "All Fri-Sun weekends June-September (bookable only)"
         elif preset_name == "newly_available":
-            desc = "Dates opening for booking in the next 7 days"
+            desc = "Single nights opening in the next 7 days"
         elif preset_name == "next_releases":
-            desc = "Next 14 days of date releases (for daily monitoring)"
+            desc = "Next 14 days of single-night releases"
+        elif preset_name == "weekend_releases":
+            desc = "WEEKENDS releasing in next 14 days (use this!)"
         else:
             desc = "Custom date range"
         logger.info('    --date-preset %s  →  %s', preset_name, desc)
 
+    # Check if a weekend releases today
+    todays_release = get_todays_weekend_release()
+    if todays_release:
+        logger.info("")
+        logger.info("🔥 TODAY at 10 AM ET: Weekend %s - %s becomes bookable!",
+                   todays_release[0].strftime('%b %d'),
+                   todays_release[1].strftime('%b %d'))
+
     logger.info("")
     logger.info("⏰ IMPORTANT: Recreation.gov releases at 10 AM Eastern Time!")
-    logger.info("   Schedule scripts to run at 10:00:01 AM ET for best results.")
+    logger.info("   Book the FRIDAY to reserve the whole weekend (Fri+Sat+Sun).")
     logger.info("")
-    logger.info("Example usage:")
-    logger.info("    camply campsites -p kirk_creek --date-preset summer_weekends")
+    logger.info("See your booking calendar:")
+    logger.info("    camply booking-calendar")
     logger.info("")
-    logger.info("Daily monitoring (run at 10 AM ET):")
-    logger.info("    camply campsites -p kirk_creek --date-preset next_releases --search-once")
+    logger.info("Daily monitoring (run at 10 AM ET via GitHub Actions):")
+    logger.info("    camply campsites -p kirk_creek --date-preset weekend_releases --search-once")
+
+
+@camply_command_line.command(cls=RichCommand, name="booking-calendar")
+@debug_option
+@click.pass_obj
+def booking_calendar(
+    context: CamplyContext,
+    debug: bool,
+) -> None:
+    """
+    Show when each summer weekend becomes bookable
+
+    Displays a calendar of all summer weekends (June-September) with their
+    release dates. Use this to know which mornings you need to be ready
+    at 10 AM Eastern Time to book.
+
+    Remember: Book the FRIDAY to reserve the whole weekend (Fri+Sat+Sun).
+    """
+    if context.debug is None:
+        context.debug = debug
+        _set_up_debug(debug=context.debug)
+
+    print_booking_calendar()
 
 
 test_notifications_kwargs = notification_kwargs.copy()

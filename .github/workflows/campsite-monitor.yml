@@ -25,12 +25,13 @@ on:
       date_preset:
         description: 'Date preset to use'
         required: true
-        default: 'next_releases'
+        default: 'weekend_releases'
         type: choice
         options:
+          - weekend_releases
+          - summer_weekends
           - next_releases
           - newly_available
-          - summer_weekends
       campground:
         description: 'Campground preset (e.g., kirk_creek)'
         required: true
@@ -39,7 +40,8 @@ on:
 env:
   # Default search configuration
   DEFAULT_CAMPGROUND: kirk_creek
-  DEFAULT_DATE_PRESET: next_releases
+  # Use weekend_releases to catch full Fri-Sat-Sun weekends as they become bookable
+  DEFAULT_DATE_PRESET: weekend_releases
 
 jobs:
   check-availability:

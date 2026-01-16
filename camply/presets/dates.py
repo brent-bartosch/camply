@@ -6,11 +6,15 @@ Accounts for the 6-month rolling booking window on Recreation.gov.
 
 IMPORTANT: Recreation.gov releases new dates at 10 AM Eastern Time daily.
 Schedule your monitoring scripts to run at 10:00:01 AM ET for best results.
+
+KEY INSIGHT: When booking a weekend (Fri-Sat-Sun), the entire weekend becomes
+bookable when the FIRST night (Friday) enters the 6-month window. You can book
+all consecutive nights in one reservation (up to 14 nights max).
 """
 
 import logging
 from datetime import date, time, timedelta
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple, NamedTuple
 
 from dateutil.relativedelta import relativedelta
 
@@ -23,6 +27,34 @@ BOOKING_WINDOW_MONTHS = 6
 # This is when new dates become available daily
 RELEASE_TIME_ET = time(10, 0, 0)  # 10:00:00 AM Eastern
 RELEASE_TIME_PT = time(7, 0, 0)   # 7:00:00 AM Pacific
+
+
+class WeekendBookingInfo(NamedTuple):
+    """Information about when a weekend becomes bookable."""
+    friday: date           # First night of weekend (arrival)
+    monday: date           # Checkout day
+    release_date: date     # When this weekend becomes bookable (6 months before Friday)
+    is_bookable_now: bool  # Can book right now?
+    days_until_release: int  # Days until release (0 if already released)
+
+
+def get_release_date(target_date: date) -> date:
+    """
+    Calculate when a target date becomes bookable.
+
+    Recreation.gov uses a 6-month rolling window. A date becomes bookable
+    exactly 6 months before it.
+
+    Args:
+        target_date: The camping date you want to book
+
+    Returns:
+        The date when that camping date becomes bookable (at 10 AM ET)
+
+    Example:
+        get_release_date(date(2026, 7, 15)) -> date(2026, 1, 15)
+    """
+    return target_date - relativedelta(months=BOOKING_WINDOW_MONTHS)
 
 
 def get_booking_window_end() -> date:
@@ -155,11 +187,182 @@ def get_next_release_dates(days_ahead: int = 14) -> List[Tuple[date, date]]:
     return dates
 
 
+def get_summer_weekends_with_booking_info(
+    year: Optional[int] = None,
+    end_month: int = 9,
+    end_day: int = 30,
+) -> List[WeekendBookingInfo]:
+    """
+    Get all summer weekends with their booking/release information.
+
+    This is the key function for planning when to book. It shows:
+    - Each weekend's dates (Fri-Mon)
+    - When that weekend becomes bookable (release date)
+    - Whether it's bookable now
+    - Days until release
+
+    Args:
+        year: Target year (defaults based on current date)
+        end_month: Month to end (default: 9 for September)
+        end_day: Day to end (default: 30)
+
+    Returns:
+        List of WeekendBookingInfo with release dates
+
+    Example output:
+        WeekendBookingInfo(
+            friday=2026-07-17,
+            monday=2026-07-20,
+            release_date=2026-01-17,  # Book on this day at 10 AM ET!
+            is_bookable_now=False,
+            days_until_release=2
+        )
+    """
+    today = date.today()
+    if year is None:
+        year = today.year if today.month < 10 else today.year + 1
+
+    weekends = []
+    current = date(year, 6, 1)
+    end = date(year, end_month, end_day)
+
+    while current < end:
+        # Find next Friday (weekday 4)
+        days_to_friday = (4 - current.weekday()) % 7
+        if days_to_friday == 0 and current.weekday() != 4:
+            days_to_friday = 7
+        friday = current + timedelta(days=days_to_friday)
+
+        if friday < end:
+            monday = friday + timedelta(days=3)
+            release_date = get_release_date(friday)
+            is_bookable = today >= release_date
+            days_until = max(0, (release_date - today).days)
+
+            weekends.append(WeekendBookingInfo(
+                friday=friday,
+                monday=monday,
+                release_date=release_date,
+                is_bookable_now=is_bookable,
+                days_until_release=days_until,
+            ))
+
+        current = friday + timedelta(days=7)
+
+    return weekends
+
+
+def get_upcoming_weekend_releases(days_ahead: int = 14) -> List[Tuple[date, date]]:
+    """
+    Get weekends whose Fridays are releasing in the next N days.
+
+    This is THE preset for daily 10 AM monitoring. It returns weekends
+    where the Friday (first bookable night) is releasing soon.
+
+    Run this daily at 10 AM ET to catch weekend releases as they happen.
+
+    Args:
+        days_ahead: How many days of releases to look ahead (default: 14)
+
+    Returns:
+        List of (friday, monday) tuples for weekends releasing soon
+
+    Example:
+        Today is Jan 15. This returns weekends where Friday falls between
+        July 15 and July 29 (dates releasing in next 14 days).
+
+        If July 18 is a Friday, you'll get (July 18, July 21) in the list.
+        That weekend becomes bookable on Jan 18 at 10 AM ET.
+    """
+    today = date.today()
+    booking_end = get_booking_window_end()
+
+    # Look at dates releasing in the next N days
+    release_window_start = booking_end
+    release_window_end = booking_end + timedelta(days=days_ahead)
+
+    weekends = []
+
+    # Find all Fridays in this window
+    current = release_window_start
+    while current <= release_window_end:
+        # If this date is a Friday, it's a weekend we want
+        if current.weekday() == 4:  # Friday
+            friday = current
+            monday = friday + timedelta(days=3)
+            weekends.append((friday, monday))
+
+        current += timedelta(days=1)
+
+    return weekends
+
+
+def get_todays_weekend_release() -> Optional[Tuple[date, date]]:
+    """
+    Get the weekend (if any) that's releasing TODAY at 10 AM ET.
+
+    Use this to check if today is a day you need to book.
+
+    Returns:
+        (friday, monday) tuple if a weekend Friday releases today, else None
+
+    Example:
+        If today is Jan 17 and July 17 is a Friday, returns (July 17, July 20).
+        If July 17 is not a Friday, returns None.
+    """
+    booking_end = get_booking_window_end()
+
+    # The date releasing today is exactly 6 months from now
+    releasing_today = booking_end
+
+    # Is it a Friday?
+    if releasing_today.weekday() == 4:
+        friday = releasing_today
+        monday = friday + timedelta(days=3)
+        return (friday, monday)
+
+    return None
+
+
+def print_booking_calendar(year: Optional[int] = None) -> None:
+    """
+    Print a calendar showing when each summer weekend becomes bookable.
+
+    Useful for planning which mornings you need to be ready at 10 AM ET.
+    """
+    weekends = get_summer_weekends_with_booking_info(year)
+
+    print("\n" + "=" * 70)
+    print("SUMMER WEEKEND BOOKING CALENDAR")
+    print("Book at 10 AM Eastern Time on the release date!")
+    print("=" * 70)
+    print(f"{'Weekend':<25} {'Release Date':<15} {'Status':<20}")
+    print("-" * 70)
+
+    for w in weekends:
+        weekend_str = f"{w.friday.strftime('%b %d')} - {w.monday.strftime('%b %d, %Y')}"
+        release_str = w.release_date.strftime('%b %d, %Y')
+
+        if w.is_bookable_now:
+            status = "✅ BOOKABLE NOW"
+        elif w.days_until_release == 0:
+            status = "🔥 RELEASES TODAY 10AM ET!"
+        elif w.days_until_release <= 7:
+            status = f"⏰ {w.days_until_release} days"
+        else:
+            status = f"{w.days_until_release} days"
+
+        print(f"{weekend_str:<25} {release_str:<15} {status:<20}")
+
+    print("=" * 70 + "\n")
+
+
 # Registry of available date presets
 DATE_PRESETS: Dict[str, Callable[[], List[Tuple[date, date]]]] = {
-    "summer_weekends": get_summer_weekends,           # June-September weekends
-    "newly_available": get_newly_available_dates,     # Dates opening this week
-    "next_releases": get_next_release_dates,          # Next 14 days of releases
+    "summer_weekends": get_summer_weekends,              # All summer weekends (bookable only)
+    "newly_available": get_newly_available_dates,        # Single nights opening this week
+    "next_releases": get_next_release_dates,             # Next 14 days of single-night releases
+    "weekend_releases": get_upcoming_weekend_releases,   # Weekends releasing in next 14 days
 }
 
 
